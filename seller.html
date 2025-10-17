@@ -12,6 +12,10 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
     <style>
       button, input, select, textarea { font-size: 16px; }
+      .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; border:1px solid #e5e7eb }
+      .badge-warn { background:#fef3c7; color:#92400e; border-color:#fde68a }
+      .badge-danger { background:#fee2e2; color:#991b1b; border-color:#fecaca }
+      .badge-ok { background:#dcfce7; color:#166534; border-color:#bbf7d0 }
     </style>
   </head>
   <body class="bg-slate-50">
@@ -23,46 +27,48 @@
       const SUPABASE_URL = "https://hsnmgpjzdjebjobayufq.supabase.co";
       const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhzbm1ncGp6ZGplYmpvYmF5dWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2OTEwNTksImV4cCI6MjA3NjI2NzA1OX0.BGJvJnREimmAmUZ4ltKwhWA4JBcTHN1T_GMIYE1m-4E";
       const SELLER_ID = "sledneck";
-      const LAKES = ["Cheshire Lake", "Plainfield Pond", "Windsor Pond", "Onota Lake", "Pontoosuc Lake"];
+      const LAKES = ["Cheshire Lake","Plainfield Pond","Windsor Pond","Onota Lake","Pontoosuc Lake"];
 
       const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
       function App(){
+        // Auth
         const [session, setSession] = useState(null);
         const [email, setEmail] = useState("");
         const [password, setPassword] = useState("");
         const [authErr, setAuthErr] = useState("");
 
+        // Data
         const [status, setStatus] = useState({ lake:"", is_open:false, left_lake:false });
         const [categories, setCategories] = useState([]);
         const [orders, setOrders] = useState([]);
-        const [loading, setLoading] = useState(false);
+        const [lowStockThreshold, setLowStockThreshold] = useState(10);
 
-        // Watch auth state
+        // Auth state
         useEffect(()=>{
           supa.auth.getSession().then(({ data })=> setSession(data.session || null));
           const { data: sub } = supa.auth.onAuthStateChange((_ev, s)=> setSession(s));
           return ()=> sub.subscription.unsubscribe();
         }, []);
 
-        // After login, load data + realtime
+        // Load + realtime after login
         useEffect(()=>{
           if (!session) return;
           (async ()=>{
             await Promise.all([loadStatus(), loadCategories(), loadOrders()]);
-            // Realtime channels
+
             supa.channel("status-"+SELLER_ID)
-              .on("postgres_changes", { event:"*", schema:"public", table:"seller_status", filter:`seller_id=eq.${SELLER_ID}` },
-                (payload)=> setStatus(payload.new || payload.old || {}))
+              .on("postgres_changes",{event:"*",schema:"public",table:"seller_status",filter:`seller_id=eq.${SELLER_ID}`},
+                payload => setStatus(payload.new || payload.old || {}))
               .subscribe();
 
             supa.channel("cats-"+SELLER_ID)
-              .on("postgres_changes", { event:"*", schema:"public", table:"categories", filter:`seller_id=eq.${SELLER_ID}` },
+              .on("postgres_changes",{event:"*",schema:"public",table:"categories",filter:`seller_id=eq.${SELLER_ID}`},
                 ()=> loadCategories())
               .subscribe();
 
             supa.channel("orders-"+SELLER_ID)
-              .on("postgres_changes", { event:"*", schema:"public", table:"orders", filter:`seller_id=eq.${SELLER_ID}` },
+              .on("postgres_changes",{event:"*",schema:"public",table:"orders",filter:`seller_id=eq.${SELLER_ID}`},
                 ()=> loadOrders())
               .subscribe();
           })();
@@ -77,7 +83,7 @@
         }
         async function signOut(){ await supa.auth.signOut(); setSession(null); }
 
-        // ----- Data loaders -----
+        // Loaders
         async function loadStatus(){
           const { data } = await supa.from("seller_status").select("*").eq("seller_id", SELLER_ID).maybeSingle();
           if (data) setStatus({ lake: data.lake, is_open: !!data.is_open, left_lake: !!data.left_lake });
@@ -91,14 +97,13 @@
           setOrders(data || []);
         }
 
-        // ----- Status upserts -----
-        async function saveStatus(patch){
-          const body = { seller_id: SELLER_ID, lake: status.lake, is_open: status.is_open, left_lake: status.left_lake, ...patch };
+        // Saves
+        async function saveStatus(patch={}){
+          const body = { seller_id: SELLER_ID, ...status, ...patch };
           const { error } = await supa.from("seller_status").upsert(body).eq("seller_id", SELLER_ID);
           if (error) alert("Status update failed: " + error.message);
         }
 
-        // ----- Category upserts -----
         async function saveCategory(cat){
           const payload = {
             id: cat.id.trim(),
@@ -107,21 +112,24 @@
             unit: "each",
             price: Number(cat.price||0),
             description: cat.description||"",
-            disabled: !!cat.disabled
+            disabled: !!cat.disabled,
+            // optional stock column (if you added it)
+            stock: cat.stock !== undefined && cat.stock !== null ? Number(cat.stock) : null
           };
           const { error } = await supa.from("categories").upsert(payload);
-          if (error) { alert("Save failed: " + error.message); return; }
+          if (error) { alert("Save failed: " + error.message + "\nIf it mentions 'stock' column, run:\nALTER TABLE public.categories ADD COLUMN IF NOT EXISTS stock integer;"); return; }
         }
+
         async function addCategory(){
           const id = prompt("New category ID (e.g., smelt, shinerXL):");
           if (!id) return;
           const name = prompt("Display name:");
           if (!name) return;
-          await saveCategory({ id, name, price: 0, description: "", disabled: false });
+          await saveCategory({ id, name, price: 0, description: "", disabled: false, stock: 0 });
           await loadCategories();
         }
+
         async function recomputeDailyDeal(){
-          // Compute 0.75 * 5 * sum(base prices) and upsert daily_deal
           const base = categories.filter(c=> ["small","medium","large","goldfish"].includes(c.id));
           const baseSum = base.reduce((a,c)=> a + Number(c.price||0), 0);
           const price = Math.round(0.75 * 5 * baseSum * 100) / 100;
@@ -136,13 +144,59 @@
           alert("Daily Deal updated to $" + price.toFixed(2));
         }
 
-        // ----- Orders -----
+        // NEW: Sold out all (disable all + close)
+        async function soldOutAll(){
+          if (!confirm("Disable all categories and close orders (Left the lake = Yes)?")) return;
+          const { error } = await supa.from("categories").update({ disabled:true }).eq("seller_id", SELLER_ID);
+          if (error) { alert("Failed to disable categories: " + error.message); return; }
+          await saveStatus({ is_open:false, left_lake:true });
+          await loadCategories();
+          await loadStatus();
+          alert("All categories disabled and status set to Closed / Left the lake.");
+        }
+
+        // Orders
         async function setOrderStatus(id, status){
           const { error } = await supa.from("orders").update({ status }).eq("seller_id", SELLER_ID).eq("id", id);
           if (error) alert("Update failed: " + error.message);
         }
 
-        // UI pieces
+        // NEW: Export CSV (one row per item)
+        function exportOrdersCSV(){
+          const headers = ["order_id","buyer_name","lake","status","created_at","lat","lng","category_id","qty","notes"];
+          const rows = [];
+          for (const o of orders){
+            const lat = o.location && o.location.lat != null ? o.location.lat : "";
+            const lng = o.location && o.location.lng != null ? o.location.lng : "";
+            const items = Array.isArray(o.items) ? o.items : [];
+            if (items.length === 0){
+              rows.push([o.id,o.buyer_name||"",o.lake||"",o.status||"",o.created_at||"",lat,lng,"",0,o.notes||""]);
+            } else {
+              for (const it of items){
+                rows.push([o.id,o.buyer_name||"",o.lake||"",o.status||"",o.created_at||"",lat,lng,it.category_id||"",it.qty||0,o.notes||""]);
+              }
+            }
+          }
+          const csv = [headers.join(","), ...rows.map(r=> r.map(v=>{
+            const s = String(v).replaceAll('"','""');
+            return /[",\n]/.test(s) ? `"${s}"` : s;
+          }).join(","))].join("\n");
+          const blob = new Blob([csv], { type:"text/csv;charset=utf-8" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = "orders.csv";
+          document.body.appendChild(a); a.click();
+          setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
+        }
+
+        const lowStockCats = useMemo(()=>{
+          // low if stock is a number and <= threshold and not disabled
+          return categories.filter(c=>{
+            const s = Number(c.stock);
+            return !isNaN(s) && s >= 0 && s <= Number(lowStockThreshold) && !c.disabled;
+          });
+        }, [categories, lowStockThreshold]);
+
         if (!session){
           return (
             React.createElement("div",{className:"min-h-screen flex items-center justify-center p-4"},
@@ -153,7 +207,7 @@
                 React.createElement("form",{onSubmit:signIn, className:"grid gap-3"},
                   React.createElement("input",{className:"border rounded-xl px-3 py-2", type:"email", placeholder:"Email", value:email, onChange:e=>setEmail(e.target.value)}),
                   React.createElement("input",{className:"border rounded-xl px-3 py-2", type:"password", placeholder:"Password", value:password, onChange:e=>setPassword(e.target.value)}),
-                  React.createElement("button",{className:"px-4 py-2 rounded-xl bg-slate-900 text-white"}, "Sign In")
+                  React.createElement("button",{className:"px-4 py-2 rounded-xl bg-slate-900 text-white", type:"submit"}, "Sign In")
                 )
               )
             )
@@ -163,18 +217,21 @@
         return (
           React.createElement("div",{className:"min-h-screen p-4"},
             React.createElement("div",{className:"max-w-5xl mx-auto space-y-4"},
+
+              // Header + actions
               React.createElement("div",{className:"flex items-center justify-between"},
                 React.createElement("h1",{className:"text-2xl font-bold"},"Seller Dashboard"),
-                React.createElement("div",{className:"flex gap-2"},
+                React.createElement("div",{className:"flex flex-wrap gap-2"},
                   React.createElement("a",{href:"./", className:"px-3 py-2 rounded-lg bg-white border"},"Buyer Page"),
-                  React.createElement("button",{onClick:signOut, className:"px-3 py-2 rounded-lg bg-white border"},"Sign Out")
+                  React.createElement("button",{onClick:exportOrdersCSV, className:"px-3 py-2 rounded-lg bg-white border"},"Export orders CSV"),
+                  React.createElement("button",{onClick:soldOutAll, className:"px-3 py-2 rounded-lg bg-red-600 text-white"},"Sold out all")
                 )
               ),
 
               // Status
               React.createElement("div",{className:"bg-white rounded-2xl p-5 shadow"},
                 React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Location & Status"),
-                React.createElement("div",{className:"grid sm:grid-cols-3 gap-3"},
+                React.createElement("div",{className:"grid sm:grid-cols-4 gap-3"},
                   React.createElement("div",null,
                     React.createElement("label",{className:"text-sm text-slate-600"},"Lake"),
                     React.createElement("select",{className:"w-full border rounded-xl px-3 py-2 mt-1", value:status.lake, onChange:e=>setStatus(s=>({...s, lake:e.target.value}))},
@@ -192,13 +249,26 @@
                     React.createElement("label",{className:"text-sm text-slate-600"},"Left the lake"),
                     React.createElement("select",{className:"w-full border rounded-xl px-3 py-2 mt-1", value:String(status.left_lake), onChange:e=>setStatus(s=>({...s, left_lake: e.target.value==="true"}))},
                       React.createElement("option",{value:"false"},"No"),
-                      React.createElement("option",{value:"true"},"Yes (show Sold Out/Closed)")
+                      React.createElement("option",{value:"true"},"Yes")
                     )
+                  ),
+                  React.createElement("div",null,
+                    React.createElement("label",{className:"text-sm text-slate-600"},"Low-stock threshold"),
+                    React.createElement("input",{type:"number", min:"0", className:"w-full border rounded-xl px-3 py-2 mt-1", value:lowStockThreshold, onChange:e=>setLowStockThreshold(e.target.value)})
                   )
                 ),
                 React.createElement("div",{className:"mt-3 flex justify-end gap-2"},
                   React.createElement("button",{className:"px-4 py-2 rounded-xl bg-white border", onClick:()=>loadStatus()},"Reset"),
                   React.createElement("button",{className:"px-4 py-2 rounded-xl bg-slate-900 text-white", onClick:()=>saveStatus({})},"Save Status")
+                ),
+                // Low-stock banner
+                React.createElement("div",{className:"mt-4"},
+                  lowStockCats.length>0
+                    ? React.createElement("div",{className:"p-3 rounded-xl border bg-amber-50 text-amber-900"},
+                        `${lowStockCats.length} item(s) at or below ${lowStockThreshold}: ` +
+                        lowStockCats.map(c=> c.name + (c.stock!=null?` (${c.stock})`:"")).join(", ")
+                      )
+                    : React.createElement("div",{className:"p-3 rounded-xl border bg-emerald-50 text-emerald-900"},"All good — no low stock right now.")
                 )
               ),
 
@@ -215,7 +285,7 @@
                   ? React.createElement("div",{className:"text-sm text-slate-500"},"No categories yet.")
                   : React.createElement("div",{className:"grid gap-3"},
                       categories.map(c=> React.createElement("div",{key:c.id, className:"border rounded-2xl p-3"},
-                        React.createElement("div",{className:"grid sm:grid-cols-6 gap-2 items-center"},
+                        React.createElement("div",{className:"grid sm:grid-cols-7 gap-2 items-center"},
                           React.createElement("div",{className:"sm:col-span-2"},
                             React.createElement("div",{className:"text-xs text-slate-500"},"ID"),
                             React.createElement("input",{className:"w-full border rounded-lg px-3 py-2", value:c.id, onChange:e=>setCategories(prev=>prev.map(x=> x.id===c.id? {...x, id:e.target.value}: x))})
@@ -229,6 +299,10 @@
                             React.createElement("input",{type:"number", step:"0.01", min:"0", className:"w-full border rounded-lg px-3 py-2", value:c.price||0, onChange:e=>setCategories(prev=>prev.map(x=> x.id===c.id? {...x, price:Number(e.target.value)}: x))})
                           ),
                           React.createElement("div",null,
+                            React.createElement("div",{className:"text-xs text-slate-500"},"Stock (each)"),
+                            React.createElement("input",{type:"number", step:"1", min:"0", className:"w-full border rounded-lg px-3 py-2", value:c.stock ?? "", onChange:e=>setCategories(prev=>prev.map(x=> x.id===c.id? {...x, stock: e.target.value===""? null : Number(e.target.value)}: x))})
+                          ),
+                          React.createElement("div",null,
                             React.createElement("div",{className:"text-xs text-slate-500"},"Disabled"),
                             React.createElement("select",{className:"w-full border rounded-lg px-3 py-2", value:String(!!c.disabled), onChange:e=>setCategories(prev=>prev.map(x=> x.id===c.id? {...x, disabled: e.target.value==="true"}: x))},
                               React.createElement("option",{value:"false"},"No"),
@@ -240,8 +314,18 @@
                           React.createElement("div",{className:"text-xs text-slate-500"},"Description"),
                           React.createElement("textarea",{rows:2, className:"w-full border rounded-lg px-3 py-2", value:c.description||"", onChange:e=>setCategories(prev=>prev.map(x=> x.id===c.id? {...x, description:e.target.value}: x))})
                         ),
-                        React.createElement("div",{className:"mt-2 flex justify-end"},
-                          React.createElement("button",{className:"px-3 py-2 rounded-lg bg-slate-900 text-white", onClick:()=>saveCategory(c)},"Save")
+                        React.createElement("div",{className:"mt-2 flex items-center justify-between"},
+                          // Low-stock badge per row
+                          React.createElement("div",null,
+                            (c.stock!=null && !c.disabled) ? (
+                              Number(c.stock) <= Number(lowStockThreshold)
+                                ? React.createElement("span",{className:"badge badge-warn"}, "Low: ", String(c.stock))
+                                : React.createElement("span",{className:"badge badge-ok"}, "Stock: ", String(c.stock))
+                            ) : React.createElement("span",{className:"text-xs text-slate-400"}, "No stock set")
+                          ),
+                          React.createElement("div",null,
+                            React.createElement("button",{className:"px-3 py-2 rounded-lg bg-slate-900 text-white", onClick:()=>saveCategory(c)},"Save")
+                          )
                         )
                       ))
                     )
