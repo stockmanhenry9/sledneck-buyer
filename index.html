@@ -1,29 +1,56 @@
 <!doctype html>
-<!-- rebuild -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sledneck Shiners - Buyer</title>
+    <meta name="theme-color" content="#0b2a5a"/>
+
+    <!-- UI + React -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <!-- ✅ Correct UMD build of Supabase -->
+
+    <!-- Supabase (UMD build) -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-    <meta name="theme-color" content="#0b2a5a"/>
+
+    <!-- Leaflet (maps) -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+
+    <style>
+      /* Better tap targets on mobile */
+      button, input, select { font-size: 16px; }
+      /* Map height */
+      #map { height: 320px; }
+      @media (min-width: 640px) { #map { height: 420px; } }
+    </style>
   </head>
   <body class="bg-slate-50">
     <div id="root"></div>
     <script>
-      const { useEffect, useMemo, useState } = React;
+      const { useEffect, useMemo, useRef, useState } = React;
 
+      // ---- Config (yours) ----
       const SUPABASE_URL = "https://hsnmgpjzdjebjobayufq.supabase.co";
       const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhzbm1ncGp6ZGplYmpvYmF5dWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2OTEwNTksImV4cCI6MjA3NjI2NzA1OX0.BGJvJnREimmAmUZ4ltKwhWA4JBcTHN1T_GMIYE1m-4E";
       const SELLER_ID = "sledneck";
 
+      // Cheshire Lake (Hoosac Lake), MA approximate center
+      const DEFAULT_CENTER = [42.561, -73.159];
+      const DEFAULT_ZOOM = 14;
+
       const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-      function classNames(...xs){ return xs.filter(Boolean).join(" "); }
       function normalizeIntInput(s){
         const n = Math.max(0, Math.floor(Number(String(s).replace(/[^0-9]/g,""))));
         return String(n);
@@ -35,9 +62,10 @@
         const [cart, setCart] = useState({});
         const [buyerName, setBuyerName] = useState("");
         const [buyerNotes, setBuyerNotes] = useState("");
-        const [lakePin, setLakePin] = useState(null);
+        const [pin, setPin] = useState(null); // { lat, lng }
         const [confirm, setConfirm] = useState(null);
 
+        // Realtime + initial fetch
         useEffect(()=>{
           async function fetchData(){
             const { data: st } = await supa.from("seller_status").select("*").eq("seller_id", SELLER_ID).maybeSingle();
@@ -82,8 +110,9 @@
 
         async function placeOrder(){
           if (!canOrderHere) return alert("Seller is not open right now.");
-          if (!lakePin) return alert("Location on the lake is required (tap the grid).");
+          if (!pin) return alert("Location is required: tap the map or use GPS.");
           if (!buyerName.trim()) return alert("Please enter your name.");
+
           const items = Object.entries(cart).map(([category_id, qty]) => ({ category_id, qty })).filter(x=>x.qty>0);
           if (items.length===0) return alert("Add at least one item.");
 
@@ -95,7 +124,7 @@
             items,
             notes: buyerNotes,
             buyer_name: buyerName.trim(),
-            location: lakePin,
+            location: pin, // {lat,lng}
             created_at: new Date().toISOString()
           };
           const { error } = await supa.from("orders").insert(order);
@@ -103,67 +132,45 @@
           setCart({}); setBuyerNotes(""); setConfirm(order);
         }
 
-        function MapGrid({ onPick, marker }){
-          const SIZE = 16;
-          const cells = [];
-          for (let i=0;i<SIZE*SIZE;i++){
-            const x = i % SIZE; const y = Math.floor(i / SIZE);
-            const m = 1; const inLake = x>=m && x<=SIZE-1-m && y>=m && y<=SIZE-1-m;
-            const isMarker = marker && marker.x===x && marker.y===y;
-            cells.push(
-              React.createElement("div",{
-                key:i,
-                onClick:()=> inLake && onPick(x,y),
-                className:
-                  "w-7 h-7 flex items-center justify-center text-[10px] " +
-                  (inLake ? "bg-blue-50 hover:bg-blue-100 cursor-crosshair " : "bg-slate-100 ") +
-                  (isMarker ? "bg-blue-300" : ""),
-                title: inLake ? "Tap to drop pin" : "Outside lake bounds"
-              }, isMarker ? "📍" : "")
-            );
-          }
-          return React.createElement(
-            "div",
-            { className:"grid grid-cols-16 gap-0 border rounded-xl overflow-hidden select-none",
-              style:{ gridTemplateColumns: `repeat(${SIZE}, minmax(0, 1fr))` } },
-            cells
-          );
-        }
-
         return (
           React.createElement("div",{className:"min-h-screen p-4"},
             React.createElement("div",{className:"max-w-3xl mx-auto space-y-4"},
               React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
                 React.createElement("h1",{className:"text-xl font-semibold mb-1"},"Sledneck Shiners - Buyer"),
-                React.createElement("div",{className:"text-sm text-slate-600"},"Lake: ", status.lake || "—", " · Seller is ", (status.is_open && !status.left_lake) ? "OPEN" : "CLOSED")
-              ),
-              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
-                React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Your Location (required)"),
-                React.createElement("div",{className:"mb-3 text-xs text-slate-600"},"Tap the grid to drop a pin roughly where you are."),
-                React.createElement(MapGrid,{onPick:(x,y)=>setLakePin({x,y}), marker:lakePin})
-              ),
-              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
-                React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Build Your Order"),
-                categories.length===0 ? React.createElement("div",{className:"text-sm text-slate-500"},"No categories yet.") :
-                React.createElement("div",{className:"grid gap-3"},
-                  categories.map(c=> React.createElement("div",{key:c.id, className:"border rounded-2xl p-3 "+(c.disabled?"opacity-50":"")},
-                    React.createElement("div",{className:"flex items-center justify-between"},
-                      React.createElement("div",null,
-                        React.createElement("div",{className:"font-medium"}, c.name),
-                        React.createElement("div",{className:"text-xs text-slate-500"}, "Price: $", (c.price||0).toFixed(2), " each")
-                      ),
-                      React.createElement("input",{
-                        type:"text", inputMode:"numeric", pattern:"[0-9]*",
-                        className:"w-20 border rounded-lg px-3 py-2",
-                        value:String(cart[c.id]||0),
-                        onChange:(e)=> setCartQty(c.id, Number(normalizeIntInput(e.target.value))),
-                        disabled:!(status.is_open && !status.left_lake) || c.disabled
-                      })
-                    ),
-                    c.description ? React.createElement("div",{className:"text-xs text-slate-600 mt-2"}, c.description) : null
-                  ))
+                React.createElement("div",{className:"text-sm text-slate-600"},
+                  "Lake: ", status.lake || "—", " · Seller is ",
+                  (status.is_open && !status.left_lake) ? "OPEN" : "CLOSED"
                 )
               ),
+
+              React.createElement(LocationSection, {
+                pin, setPin, defaultCenter: DEFAULT_CENTER, defaultZoom: DEFAULT_ZOOM
+              }),
+
+              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+                React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Build Your Order"),
+                categories.length===0
+                  ? React.createElement("div",{className:"text-sm text-slate-500"},"No categories yet.")
+                  : React.createElement("div",{className:"grid gap-3"},
+                      categories.map(c=> React.createElement("div",{key:c.id, className:"border rounded-2xl p-3 "+(c.disabled?"opacity-50":"")},
+                        React.createElement("div",{className:"flex items-center justify-between"},
+                          React.createElement("div",null,
+                            React.createElement("div",{className:"font-medium"}, c.name),
+                            React.createElement("div",{className:"text-xs text-slate-500"}, "Price: $", (c.price||0).toFixed(2), " each")
+                          ),
+                          React.createElement("input",{
+                            type:"text", inputMode:"numeric", pattern:"[0-9]*",
+                            className:"w-20 border rounded-lg px-3 py-2",
+                            value:String(cart[c.id]||0),
+                            onChange:(e)=> setCartQty(c.id, Number(normalizeIntInput(e.target.value))),
+                            disabled:!(status.is_open && !status.left_lake) || c.disabled
+                          })
+                        ),
+                        c.description ? React.createElement("div",{className:"text-xs text-slate-600 mt-2"}, c.description) : null
+                      ))
+                    )
+              ),
+
               React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
                 React.createElement("div",{className:"grid sm:grid-cols-2 gap-3"},
                   React.createElement("div",null,
@@ -184,6 +191,7 @@
                   React.createElement("button",{onClick:placeOrder, className:"px-4 py-2 rounded-xl bg-slate-900 text-white", disabled:!(status.is_open && !status.left_lake)},"Place Order")
                 )
               ),
+
               confirm && React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
                 React.createElement("h2",{className:"text-lg font-semibold mb-1"},"Order Received"),
                 React.createElement("div",{className:"text-sm"},"Thanks, ", confirm.buyer_name, "! Your order ", confirm.id, " has been received."),
@@ -191,9 +199,92 @@
                   React.createElement("button",{className:"px-4 py-2 rounded-xl bg-slate-900 text-white", onClick:()=>setConfirm(null)},"Done")
                 )
               ),
-              React.createElement("div",{className:"text-xs text-slate-500"},"Always-on link for sellerId: ", SELLER_ID, ". Updates live from the seller app.")
+
+              React.createElement("div",{className:"text-xs text-slate-500"},
+                "Map imagery © Esri, Maxar, Earthstar Geographics, and contributors. Location is shared only with the seller for this order."
+              )
             )
           )
+        );
+      }
+
+      // --- Aerial Map component using Leaflet ---
+      function LocationSection({ pin, setPin, defaultCenter, defaultZoom }){
+        const mapRef = useRef(null);
+        const markerRef = useRef(null);
+
+        useEffect(()=>{
+          if (mapRef.current) return; // init once
+
+          const map = L.map('map', {
+            center: defaultCenter,
+            zoom: defaultZoom,
+            zoomControl: true,
+          });
+
+          // Esri World Imagery (no key required)
+          L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            {
+              attribution: 'Tiles &copy; Esri &mdash; Sources: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+            }
+          ).addTo(map);
+
+          // Click to drop/move pin
+          map.on('click', (e)=>{
+            const { lat, lng } = e.latlng;
+            placeOrMoveMarker(lat, lng);
+          });
+
+          mapRef.current = map;
+
+          function placeOrMoveMarker(lat, lng){
+            if (!markerRef.current){
+              markerRef.current = L.marker([lat,lng], { draggable: true }).addTo(mapRef.current);
+              markerRef.current.on('dragend', (ev)=>{
+                const ll = ev.target.getLatLng();
+                setPin({ lat: round6(ll.lat), lng: round6(ll.lng) });
+              });
+            } else {
+              markerRef.current.setLatLng([lat,lng]);
+            }
+            setPin({ lat: round6(lat), lng: round6(lng) });
+          }
+
+          // expose helper for GPS button
+          mapRef.current._placeOrMoveMarker = placeOrMoveMarker;
+
+          // helper rounding
+          function round6(x){ return Math.round(x * 1e6) / 1e6; }
+        }, [defaultCenter, defaultZoom, setPin]);
+
+        async function useGPS(){
+          if (!navigator.geolocation) { alert("Geolocation not supported."); return; }
+          navigator.geolocation.getCurrentPosition(
+            (pos)=>{
+              const { latitude, longitude } = pos.coords;
+              const map = mapRef.current;
+              if (!map) return;
+              map.setView([latitude, longitude], 16, { animate: true });
+              map._placeOrMoveMarker(latitude, longitude);
+            },
+            (err)=> alert("GPS error: " + err.message),
+            { enableHighAccuracy: true, timeout: 8000 }
+          );
+        }
+
+        return React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+          React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Your Location (required)"),
+          React.createElement("div",{className:"mb-3 text-xs text-slate-600"},
+            "Tap the map to drop a pin on the ice, or use GPS. Pin is required to place an order."
+          ),
+          React.createElement("div",{className:"flex gap-2 mb-3"},
+            React.createElement("button",{onClick:useGPS, className:"px-3 py-2 rounded-lg bg-white border"},"Use GPS"),
+            pin
+              ? React.createElement("span",{className:"text-xs self-center text-slate-600"}, `Pin: ${pin.lat.toFixed(6)}, ${pin.lng.toFixed(6)}`)
+              : React.createElement("span",{className:"text-xs self-center text-slate-500"}, "No pin yet")
+          ),
+          React.createElement("div",{id:"map", className:"rounded-xl overflow-hidden border"})
         );
       }
 
