@@ -1,0 +1,204 @@
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sledneck Shiners - Buyer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- ✅ Correct UMD build of Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+    <meta name="theme-color" content="#0b2a5a"/>
+  </head>
+  <body class="bg-slate-50">
+    <div id="root"></div>
+    <script>
+      const { useEffect, useMemo, useState } = React;
+
+      const SUPABASE_URL = "https://hsnmgpjzdjebjobayufq.supabase.co";
+      const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhzbm1ncGp6ZGplYmpvYmF5dWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2OTEwNTksImV4cCI6MjA3NjI2NzA1OX0.BGJvJnREimmAmUZ4ltKwhWA4JBcTHN1T_GMIYE1m-4E";
+      const SELLER_ID = "sledneck";
+
+      const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+      function classNames(...xs){ return xs.filter(Boolean).join(" "); }
+      function normalizeIntInput(s){
+        const n = Math.max(0, Math.floor(Number(String(s).replace(/[^0-9]/g,""))));
+        return String(n);
+      }
+
+      function App(){
+        const [status, setStatus] = useState({ is_open:false, left_lake:false, lake:"" });
+        const [categories, setCategories] = useState([]);
+        const [cart, setCart] = useState({});
+        const [buyerName, setBuyerName] = useState("");
+        const [buyerNotes, setBuyerNotes] = useState("");
+        const [lakePin, setLakePin] = useState(null);
+        const [confirm, setConfirm] = useState(null);
+
+        useEffect(()=>{
+          async function fetchData(){
+            const { data: st } = await supa.from("seller_status").select("*").eq("seller_id", SELLER_ID).maybeSingle();
+            if (st) setStatus(st);
+            const { data: cats } = await supa.from("categories").select("*").eq("seller_id", SELLER_ID).order("name");
+            if (cats) setCategories(cats);
+          }
+          fetchData();
+
+          const ch1 = supa.channel("status-"+SELLER_ID)
+            .on("postgres_changes",{ event: "*", schema:"public", table:"seller_status", filter: `seller_id=eq.${SELLER_ID}`}, (payload)=>{
+              setStatus(payload.new || payload.old || {});
+            }).subscribe();
+          const ch2 = supa.channel("cats-"+SELLER_ID)
+            .on("postgres_changes",{ event: "*", schema:"public", table:"categories", filter: `seller_id=eq.${SELLER_ID}`}, ()=>{
+              supa.from("categories").select("*").eq("seller_id", SELLER_ID).order("name").then(({data})=> { if (data) setCategories(data); });
+            }).subscribe();
+
+          return ()=>{ supa.removeChannel(ch1); supa.removeChannel(ch2); }
+        }, []);
+
+        const canOrderHere = status.is_open && !status.left_lake;
+
+        function setCartQty(id, qty){
+          setCart(prev => {
+            const q = Math.max(0, Math.floor(qty));
+            const next = {...prev};
+            if (q===0) delete next[id]; else next[id]=q;
+            return next;
+          });
+        }
+
+        const cartTotal = useMemo(()=>{
+          let t=0;
+          for (const [id,qty] of Object.entries(cart)){
+            const c = categories.find(x=>x.id===id);
+            if (!c) continue;
+            t += (c.price || 0)*qty;
+          }
+          return t;
+        }, [cart, categories]);
+
+        async function placeOrder(){
+          if (!canOrderHere) return alert("Seller is not open right now.");
+          if (!lakePin) return alert("Location on the lake is required (tap the grid).");
+          if (!buyerName.trim()) return alert("Please enter your name.");
+          const items = Object.entries(cart).map(([category_id, qty]) => ({ category_id, qty })).filter(x=>x.qty>0);
+          if (items.length===0) return alert("Add at least one item.");
+
+          const order = {
+            id: "ORD-"+Date.now(),
+            seller_id: SELLER_ID,
+            lake: status.lake || "",
+            status: "pending",
+            items,
+            notes: buyerNotes,
+            buyer_name: buyerName.trim(),
+            location: lakePin,
+            created_at: new Date().toISOString()
+          };
+          const { error } = await supa.from("orders").insert(order);
+          if (error) { alert("Order failed: "+error.message); return; }
+          setCart({}); setBuyerNotes(""); setConfirm(order);
+        }
+
+        function MapGrid({ onPick, marker }){
+          const SIZE = 16;
+          const cells = [];
+          for (let i=0;i<SIZE*SIZE;i++){
+            const x = i % SIZE; const y = Math.floor(i / SIZE);
+            const m = 1; const inLake = x>=m && x<=SIZE-1-m && y>=m && y<=SIZE-1-m;
+            const isMarker = marker && marker.x===x && marker.y===y;
+            cells.push(
+              React.createElement("div",{
+                key:i,
+                onClick:()=> inLake && onPick(x,y),
+                className:
+                  "w-7 h-7 flex items-center justify-center text-[10px] " +
+                  (inLake ? "bg-blue-50 hover:bg-blue-100 cursor-crosshair " : "bg-slate-100 ") +
+                  (isMarker ? "bg-blue-300" : ""),
+                title: inLake ? "Tap to drop pin" : "Outside lake bounds"
+              }, isMarker ? "📍" : "")
+            );
+          }
+          return React.createElement(
+            "div",
+            { className:"grid grid-cols-16 gap-0 border rounded-xl overflow-hidden select-none",
+              style:{ gridTemplateColumns: `repeat(${SIZE}, minmax(0, 1fr))` } },
+            cells
+          );
+        }
+
+        return (
+          React.createElement("div",{className:"min-h-screen p-4"},
+            React.createElement("div",{className:"max-w-3xl mx-auto space-y-4"},
+              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+                React.createElement("h1",{className:"text-xl font-semibold mb-1"},"Sledneck Shiners - Buyer"),
+                React.createElement("div",{className:"text-sm text-slate-600"},"Lake: ", status.lake || "—", " · Seller is ", (status.is_open && !status.left_lake) ? "OPEN" : "CLOSED")
+              ),
+              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+                React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Your Location (required)"),
+                React.createElement("div",{className:"mb-3 text-xs text-slate-600"},"Tap the grid to drop a pin roughly where you are."),
+                React.createElement(MapGrid,{onPick:(x,y)=>setLakePin({x,y}), marker:lakePin})
+              ),
+              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+                React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Build Your Order"),
+                categories.length===0 ? React.createElement("div",{className:"text-sm text-slate-500"},"No categories yet.") :
+                React.createElement("div",{className:"grid gap-3"},
+                  categories.map(c=> React.createElement("div",{key:c.id, className:"border rounded-2xl p-3 "+(c.disabled?"opacity-50":"")},
+                    React.createElement("div",{className:"flex items-center justify-between"},
+                      React.createElement("div",null,
+                        React.createElement("div",{className:"font-medium"}, c.name),
+                        React.createElement("div",{className:"text-xs text-slate-500"}, "Price: $", (c.price||0).toFixed(2), " each")
+                      ),
+                      React.createElement("input",{
+                        type:"text", inputMode:"numeric", pattern:"[0-9]*",
+                        className:"w-20 border rounded-lg px-3 py-2",
+                        value:String(cart[c.id]||0),
+                        onChange:(e)=> setCartQty(c.id, Number(normalizeIntInput(e.target.value))),
+                        disabled:!(status.is_open && !status.left_lake) || c.disabled
+                      })
+                    ),
+                    c.description ? React.createElement("div",{className:"text-xs text-slate-600 mt-2"}, c.description) : null
+                  ))
+                )
+              ),
+              React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+                React.createElement("div",{className:"grid sm:grid-cols-2 gap-3"},
+                  React.createElement("div",null,
+                    React.createElement("label",{className:"text-sm text-slate-600"},"Your Name (required)"),
+                    React.createElement("input",{className:"w-full border rounded-xl px-3 py-2 mt-1", value:buyerName, onChange:e=>setBuyerName(e.target.value), placeholder:"First name or nickname"})
+                  ),
+                  React.createElement("div",null,
+                    React.createElement("label",{className:"text-sm text-slate-600"},"Notes (optional)"),
+                    React.createElement("input",{className:"w-full border rounded-xl px-3 py-2 mt-1", value:buyerNotes, onChange:e=>setBuyerNotes(e.target.value), placeholder:"Bucket size, special spot, etc."})
+                  )
+                ),
+                React.createElement("div",{className:"mt-3 p-3 rounded-xl bg-slate-100 flex items-center justify-between"},
+                  React.createElement("div",{className:"text-sm"},"Cart total estimate"),
+                  React.createElement("div",{className:"text-lg font-semibold"},"$", cartTotal.toFixed(2))
+                ),
+                React.createElement("div",{className:"flex items-center justify-between mt-4"},
+                  React.createElement("div",{className:"text-sm text-slate-600"},"Status: ", (status.is_open && !status.left_lake) ? "Open here" : "Closed here"),
+                  React.createElement("button",{onClick:placeOrder, className:"px-4 py-2 rounded-xl bg-slate-900 text-white", disabled:!(status.is_open && !status.left_lake)},"Place Order")
+                )
+              ),
+              confirm && React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
+                React.createElement("h2",{className:"text-lg font-semibold mb-1"},"Order Received"),
+                React.createElement("div",{className:"text-sm"},"Thanks, ", confirm.buyer_name, "! Your order ", confirm.id, " has been received."),
+                React.createElement("div",{className:"mt-3 flex justify-end"},
+                  React.createElement("button",{className:"px-4 py-2 rounded-xl bg-slate-900 text-white", onClick:()=>setConfirm(null)},"Done")
+                )
+              ),
+              React.createElement("div",{className:"text-xs text-slate-500"},"Always-on link for sellerId: ", SELLER_ID, ". Updates live from the seller app.")
+            )
+          )
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(React.createElement(App));
+    </script>
+  </body>
+</html>
