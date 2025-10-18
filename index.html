@@ -34,6 +34,11 @@
       .pill { border:1px solid #e5e7eb; border-radius:999px; padding:6px 12px; }
       .pill-green { background:#16a34a; color:white; border-color:#16a34a; }
       .pill-red   { background:#dc2626; color:white; border-color:#dc2626; }
+      .badge { padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #e5e7eb }
+      .badge-warn { background:#fef3c7; color:#92400e; border-color:#fde68a }
+      .badge-ok { background:#dcfce7; color:#166534; border-color:#bbf7d0 }
+      .badge-danger { background:#fee2e2; color:#991b1b; border-color:#fecaca }
+      .badge-muted { background:#f3f4f6; color:#374151; border-color:#e5e7eb }
     </style>
   </head>
   <body class="bg-slate-50">
@@ -62,6 +67,20 @@
       function normalizeIntInput(s){
         const n = Math.max(0, Math.floor(Number(String(s).replace(/[^0-9]/g,""))));
         return String(n);
+      }
+
+      function StockBadge({ c }){
+        // disabled OR stock <= 0 → Sold out
+        const s = (c.stock === null || c.stock === undefined) ? null : Number(c.stock);
+        if (c.disabled || (s !== null && s <= 0)) {
+          return React.createElement("span",{className:"badge badge-danger"},"Sold Out");
+        }
+        if (s === null) {
+          return React.createElement("span",{className:"badge badge-muted"},"In stock");
+        }
+        // low stock warning at <=10
+        const cls = s <= 10 ? "badge badge-warn" : "badge badge-ok";
+        return React.createElement("span",{className:cls}, `${s} left`);
       }
 
       function App(){
@@ -107,7 +126,6 @@
           if (error) { console.error(error); return; }
           const map = {};
           for (const row of (data||[])) map[row.lake] = !!row.is_open;
-          // ensure all lakes exist in the map
           for (const L of LAKES) if (!(L in map)) map[L] = false;
           setLakeOpenMap(map);
           setIsOpen(!!map[lake]);
@@ -116,7 +134,10 @@
         useEffect(()=>{ setIsOpen(!!lakeOpenMap[lake]); }, [lake, lakeOpenMap]);
 
         async function loadCategories(){
-          const { data } = await supa.from("categories").select("*").eq("seller_id", SELLER_ID);
+          const { data } = await supa
+            .from("categories")
+            .select("id,name,unit,price,description,disabled,stock")
+            .eq("seller_id", SELLER_ID);
           if (!data) return;
           setCategories(sortCats(data));
         }
@@ -162,13 +183,13 @@
 
           const order = {
             id: "ORD-"+Date.now(),
-            seller_id: SELLER_ID,     // IMPORTANT: ensures it shows on seller dashboard
-            lake,                     // IMPORTANT: lake saved for the order
+            seller_id: SELLER_ID,
+            lake,
             status: "pending",
             items,
             notes: buyerNotes,
             buyer_name: buyerName.trim(),
-            location: pin,            // {lat,lng}
+            location: pin,
             created_at: new Date().toISOString()
           };
           const { error } = await supa.from("orders").insert(order);
@@ -225,22 +246,28 @@
                 categories.length===0
                   ? React.createElement("div",{className:"text-sm text-slate-500"},"No categories yet.")
                   : React.createElement("div",{className:"grid gap-3"},
-                      categories.map(c=> React.createElement("div",{key:c.id, className:"border rounded-2xl p-3 "+(c.disabled?"opacity-50":"")},
-                        React.createElement("div",{className:"flex items-center justify-between"},
-                          React.createElement("div",null,
-                            React.createElement("div",{className:"font-medium"}, displayCatName(c)),
-                            React.createElement("div",{className:"text-xs text-slate-500"}, "Price: $", (c.price||0).toFixed(2), " each")
+                      categories.map(c=> {
+                        const disabled = c.disabled || (c.stock !== null && c.stock !== undefined && Number(c.stock) <= 0);
+                        return React.createElement("div",{key:c.id, className:"border rounded-2xl p-3 "+(disabled?"opacity-50":"")},
+                          React.createElement("div",{className:"flex items-center justify-between gap-3"},
+                            React.createElement("div",null,
+                              React.createElement("div",{className:"font-medium"}, displayCatName(c)),
+                              React.createElement("div",{className:"text-xs text-slate-500"}, "Price: $", (c.price||0).toFixed(2), " each")
+                            ),
+                            React.createElement("div",{className:"flex items-center gap-2"},
+                              React.createElement(StockBadge,{ c }),
+                              React.createElement("input",{
+                                type:"text", inputMode:"numeric", pattern:"[0-9]*",
+                                className:"w-20 border rounded-lg px-3 py-2",
+                                value:String(cart[c.id]||0),
+                                onChange:(e)=> setCartQty(c.id, Number(normalizeIntInput(e.target.value))),
+                                disabled:!canOrderHere || disabled
+                              })
+                            )
                           ),
-                          React.createElement("input",{
-                            type:"text", inputMode:"numeric", pattern:"[0-9]*",
-                            className:"w-20 border rounded-lg px-3 py-2",
-                            value:String(cart[c.id]||0),
-                            onChange:(e)=> setCartQty(c.id, Number(normalizeIntInput(e.target.value))),
-                            disabled:!canOrderHere || c.disabled
-                          })
-                        ),
-                        c.description ? React.createElement("div",{className:"text-xs text-slate-600 mt-2"}, c.description) : null
-                      ))
+                          c.description ? React.createElement("div",{className:"text-xs text-slate-600 mt-2"}, c.description) : null
+                        );
+                      })
                     ),
 
                 // Buyer info & submit
