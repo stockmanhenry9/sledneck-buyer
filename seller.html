@@ -33,7 +33,7 @@
 
       const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-      // Friendly label for buyer
+      // Friendly buyer label (never show “placeholder”)
       function displayCatName(c){
         if (c.id === 'placeholder') return 'Out of Stock';
         return c.name || c.id.replace(/_/g,' ').replace(/\b\w/g, s=>s.toUpperCase());
@@ -52,6 +52,14 @@
         const [categories, setCategories] = useState([]);
         const [orders, setOrders] = useState([]);
         const [lowStockThreshold, setLowStockThreshold] = useState(10);
+
+        // Toast
+        const [toast, setToast] = useState("");
+
+        function showToast(msg){
+          setToast(msg);
+          setTimeout(()=> setToast(""), 1500);
+        }
 
         // Auth state
         useEffect(()=>{
@@ -101,7 +109,6 @@
           if (error) { console.error(error); return; }
           const map={};
           for (const row of (data||[])) map[row.lake]=!!row.is_open;
-          // ensure all lakes present
           for (const L of LAKES) if (!(L in map)) map[L]=false;
           setLakeOpenMap(map);
           if (!LAKES.includes(selectedLake)) setSelectedLake(LAKES[0]);
@@ -110,6 +117,7 @@
         async function loadCategories(){
           const { data } = await supa.from("categories").select("*").eq("seller_id", SELLER_ID);
           const list = (data || []);
+          // Sort: Out of Stock first, then small/medium/large/goldfish, then others A→Z
           const orderMap = { placeholder:1, small:2, medium:3, large:4, goldfish:5 };
           list.sort((a,b)=>{
             const sa = orderMap[a.id] ?? (100 + a.id.localeCompare(b.id));
@@ -120,7 +128,11 @@
         }
 
         async function loadOrders(){
-          const { data } = await supa.from("orders").select("*").eq("seller_id", SELLER_ID).order("created_at", { ascending:false });
+          const { data } = await supa
+            .from("orders")
+            .select("*")
+            .eq("seller_id", SELLER_ID)
+            .order("created_at", { ascending:false });
           setOrders(data || []);
         }
 
@@ -132,29 +144,39 @@
             .upsert(payload, { onConflict: 'seller_id,lake' });
           if (error) { alert("Failed to update lake status: " + error.message); return; }
           await loadLakeStatus();
+          showToast(`Saved: ${lake} → ${is_open ? "Open" : "Closed"}`);
         }
 
         async function saveCategory(cat){
           const payload = {
-            id: cat.id.trim(),
+            id: String(cat.id || "").trim(),
             seller_id: SELLER_ID,
             name: displayCatName(cat),
             unit: "each",
-            price: Number(cat.price||0),
-            description: cat.description||"",
+            price: Number(cat.price ?? 0),
+            description: (cat.description || "").toString(),
             disabled: !!cat.disabled,
-            stock: cat.stock !== undefined && cat.stock !== null ? Number(cat.stock) : null
+            stock: (cat.stock === "" || cat.stock === null || cat.stock === undefined)
+              ? null
+              : Number(cat.stock)
           };
-          const { error } = await supa.from("categories")
+          if (!payload.id) { alert("ID is required."); return; }
+
+          const { error } = await supa
+            .from("categories")
             .upsert(payload, { onConflict: 'seller_id,id' });
+
           if (error) { alert("Save failed: " + error.message + "\n(If it mentions 'stock', run: ALTER TABLE public.categories ADD COLUMN IF NOT EXISTS stock integer;)"); return; }
+
+          // Pull back the latest to reflect DB truth
+          await loadCategories();
+          showToast("Saved ✓");
         }
 
         async function addCategory(){
           const id = prompt("New category ID (e.g., smallplus, shiner_xl):");
           if (!id) return;
           await saveCategory({ id, price: 0, description: "", disabled: false, stock: 0 });
-          await loadCategories();
         }
 
         async function recomputeDailyDeal(){
@@ -167,15 +189,13 @@
             description: "Bundle: 5 Small + 5 Medium + 5 Large + 5 Goldfish at 3/4 price.",
             disabled: false
           });
-          await loadCategories();
-          alert("Daily Deal updated to $" + price.toFixed(2));
+          showToast("Daily Deal → $" + price.toFixed(2));
         }
 
         async function soldOutAll(){
           if (!confirm("Mark every category Out of stock and set ALL lakes to Closed?")) return;
           const { error } = await supa.from("categories").update({ disabled:true }).eq("seller_id", SELLER_ID);
           if (error) { alert("Failed to disable categories: " + error.message); return; }
-          // set every lake to closed
           for (const L of LAKES) await saveLakeOpen(L, false);
           await loadCategories();
           await loadLakeStatus();
@@ -183,13 +203,18 @@
         }
 
         async function setOrderStatus(id, status){
-          const { error } = await supa.from("orders").update({ status }).eq("seller_id", SELLER_ID).eq("id", id);
+          const { error } = await supa
+            .from("orders")
+            .update({ status })
+            .eq("seller_id", SELLER_ID)
+            .eq("id", id);
           if (error) {
             alert("Update failed: " + error.message);
             await loadCategories();
             return;
           }
-          await loadCategories();
+          await loadCategories(); // reflect stock changes on Accept/Cancel
+          showToast(`Order ${id} → ${status}`);
         }
 
         function exportOrdersCSV(){
@@ -258,7 +283,7 @@
                 )
               ),
 
-              // Per-lake Open/Closed
+              <!-- Per-lake Open/Closed -->
               React.createElement("div",{className:"bg-white rounded-2xl p-5 shadow"},
                 React.createElement("h2",{className:"text-lg font-semibold mb-3"},"Lake Open/Closed"),
                 React.createElement("div",{className:"grid sm:grid-cols-4 gap-3"},
@@ -367,7 +392,8 @@
                       ))
                     )
               )
-            )
+            ),
+            toast && React.createElement("div", { className:"fixed bottom-4 left-1/2 -translate-x-1/2 bg-black text-white rounded-full px-4 py-2 shadow" }, toast)
           )
         );
       }
