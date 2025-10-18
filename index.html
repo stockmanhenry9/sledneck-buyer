@@ -11,7 +11,7 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
-    <!-- Supabase (UMD build) -->
+    <!-- Supabase (UMD) -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 
     <!-- Leaflet (maps) -->
@@ -28,9 +28,12 @@
     ></script>
 
     <style>
-      button, input, select { font-size: 16px; }
+      button, input, select, textarea { font-size: 16px; }
       #map { height: 320px; }
       @media (min-width: 640px) { #map { height: 420px; } }
+      .pill { border:1px solid #e5e7eb; border-radius:999px; padding:6px 12px; }
+      .pill-green { background:#16a34a; color:white; border-color:#16a34a; }
+      .pill-red   { background:#dc2626; color:white; border-color:#dc2626; }
     </style>
   </head>
   <body class="bg-slate-50">
@@ -38,12 +41,14 @@
     <script>
       const { useEffect, useMemo, useRef, useState } = React;
 
-      // ---- Config (yours) ----
+      // ---- Your config ----
       const SUPABASE_URL = "https://hsnmgpjzdjebjobayufq.supabase.co";
       const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhzbm1ncGp6ZGplYmpvYmF5dWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2OTEwNTksImV4cCI6MjA3NjI2NzA1OX0.BGJvJnREimmAmUZ4ltKwhWA4JBcTHN1T_GMIYE1m-4E";
       const SELLER_ID = "sledneck";
+      const LAKES = ["Cheshire Lake","Plainfield Pond","Windsor Pond","Onota Lake","Pontoosuc Lake"];
 
-      const DEFAULT_CENTER = [42.561, -73.159]; // Cheshire Lake approx center
+      // Default map view (Cheshire Lake approx)
+      const DEFAULT_CENTER = [42.561, -73.159];
       const DEFAULT_ZOOM = 14;
 
       const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -60,7 +65,10 @@
       }
 
       function App(){
-        const [status, setStatus] = useState({ is_open:false, lake:"" });
+        const [lake, setLake] = useState(LAKES[0]);
+        const [lakeOpenMap, setLakeOpenMap] = useState({}); // { lake: boolean }
+        const [isOpen, setIsOpen] = useState(false);
+
         const [categories, setCategories] = useState([]);
         const [cart, setCart] = useState({});
         const [buyerName, setBuyerName] = useState("");
@@ -68,37 +76,50 @@
         const [pin, setPin] = useState(null); // { lat, lng }
         const [confirm, setConfirm] = useState(null);
 
-        // Review form state (private to seller)
+        // Review form (private to seller)
         const [revName, setRevName] = useState("");
         const [revStars, setRevStars] = useState(5);
         const [revText, setRevText] = useState("");
 
-        // Initial fetch + realtime
+        // Initial fetch + realtime for lake status and categories
         useEffect(()=>{
           async function fetchData(){
-            const { data: st } = await supa.from("seller_status").select("*").eq("seller_id", SELLER_ID).maybeSingle();
-            if (st) setStatus({ is_open: !!st.is_open, lake: st.lake || "" });
-
-            const { data: cats } = await supa.from("categories").select("*").eq("seller_id", SELLER_ID);
-            if (cats) setCategories(sortCats(cats));
+            await Promise.all([loadLakeStatus(), loadCategories()]);
           }
           fetchData();
 
-          const chStatus = supa.channel("status-"+SELLER_ID)
-            .on("postgres_changes",{ event:"*", schema:"public", table:"seller_status", filter:`seller_id=eq.${SELLER_ID}` }, payload=>{
-              const st = payload.new || payload.old || {};
-              setStatus({ is_open: !!st.is_open, lake: st.lake || "" });
-            }).subscribe();
+          const chStatus = supa.channel("lake-status-"+SELLER_ID)
+            .on("postgres_changes",{ event:"*", schema:"public", table:"seller_lake_status", filter:`seller_id=eq.${SELLER_ID}` }, ()=>loadLakeStatus())
+            .subscribe();
 
           const chCats = supa.channel("cats-"+SELLER_ID)
-            .on("postgres_changes",{ event:"*", schema:"public", table:"categories", filter:`seller_id=eq.${SELLER_ID}` }, ()=>{
-              supa.from("categories").select("*").eq("seller_id", SELLER_ID).then(({data})=>{
-                if (data) setCategories(sortCats(data));
-              });
-            }).subscribe();
+            .on("postgres_changes",{ event:"*", schema:"public", table:"categories", filter:`seller_id=eq.${SELLER_ID}` }, ()=>loadCategories())
+            .subscribe();
 
           return ()=>{ supa.removeChannel(chStatus); supa.removeChannel(chCats); }
         }, []);
+
+        async function loadLakeStatus(){
+          const { data, error } = await supa
+            .from("seller_lake_status")
+            .select("*")
+            .eq("seller_id", SELLER_ID);
+          if (error) { console.error(error); return; }
+          const map = {};
+          for (const row of (data||[])) map[row.lake] = !!row.is_open;
+          // ensure all lakes exist in the map
+          for (const L of LAKES) if (!(L in map)) map[L] = false;
+          setLakeOpenMap(map);
+          setIsOpen(!!map[lake]);
+        }
+
+        useEffect(()=>{ setIsOpen(!!lakeOpenMap[lake]); }, [lake, lakeOpenMap]);
+
+        async function loadCategories(){
+          const { data } = await supa.from("categories").select("*").eq("seller_id", SELLER_ID);
+          if (!data) return;
+          setCategories(sortCats(data));
+        }
 
         function sortCats(list){
           // Out of Stock first, then Small/Medium/Large/Goldfish, then others A→Z
@@ -110,7 +131,7 @@
           });
         }
 
-        const canOrderHere = status.is_open;
+        const canOrderHere = isOpen;
 
         function setCartQty(id, qty){
           setCart(prev => {
@@ -132,7 +153,7 @@
         }, [cart, categories]);
 
         async function placeOrder(){
-          if (!canOrderHere) return alert("Seller is not open right now.");
+          if (!canOrderHere) return alert("Seller is not open at this lake right now.");
           if (!pin) return alert("Location is required: tap the map or use GPS.");
           if (!buyerName.trim()) return alert("Please enter your name.");
 
@@ -141,28 +162,27 @@
 
           const order = {
             id: "ORD-"+Date.now(),
-            seller_id: SELLER_ID,
-            lake: status.lake || "",
+            seller_id: SELLER_ID,     // IMPORTANT: ensures it shows on seller dashboard
+            lake,                     // IMPORTANT: lake saved for the order
             status: "pending",
             items,
             notes: buyerNotes,
             buyer_name: buyerName.trim(),
-            location: pin, // {lat,lng}
+            location: pin,            // {lat,lng}
             created_at: new Date().toISOString()
           };
           const { error } = await supa.from("orders").insert(order);
           if (error) { alert("Order failed: "+error.message); return; }
+
           setCart({}); setBuyerNotes(""); setConfirm(order);
         }
 
         async function submitReview(){
-          if (!buyerName.trim() && !revName.trim()){
-            alert("Please enter a name for your review.");
-            return;
-          }
+          const name = (revName || buyerName || "Anonymous").trim();
+          if (!name){ alert("Please enter a name for your review."); return; }
           const payload = {
             seller_id: SELLER_ID,
-            buyer_name: (revName || buyerName || "Anonymous").trim(),
+            buyer_name: name,
             stars: Number(revStars)||5,
             text: (revText||"").trim()
           };
@@ -178,10 +198,19 @@
 
               // Header
               React.createElement("div",{className:"rounded-2xl shadow p-5 bg-white"},
-                React.createElement("h1",{className:"text-xl font-semibold mb-1"},"Sledneck Shiners - Buyer"),
-                React.createElement("div",{className:"text-sm text-slate-600"},
-                  "Lake: ", status.lake || "—", " · Seller is ",
-                  canOrderHere ? "OPEN" : "CLOSED"
+                React.createElement("h1",{className:"text-xl font-semibold mb-2"},"Sledneck Shiners - Buyer"),
+                React.createElement("div",{className:"grid sm:grid-cols-3 gap-3"},
+                  React.createElement("div",null,
+                    React.createElement("label",{className:"text-sm text-slate-600"},"Your Lake"),
+                    React.createElement("select",{className:"w-full border rounded-xl px-3 py-2 mt-1", value:lake, onChange:e=>setLake(e.target.value)},
+                      LAKES.map(L=> React.createElement("option",{key:L,value:L},L))
+                    )
+                  ),
+                  React.createElement("div",{className:"sm:col-span-2 flex items-end"},
+                    React.createElement("div",{
+                      className:"pill " + (canOrderHere ? "pill-green" : "pill-red")
+                    }, canOrderHere ? "OPEN at this lake" : "CLOSED at this lake")
+                  )
                 )
               ),
 
@@ -290,11 +319,7 @@
         useEffect(()=>{
           if (mapRef.current) return; // init once
 
-          const map = L.map('map', {
-            center: defaultCenter,
-            zoom: defaultZoom,
-            zoomControl: true,
-          });
+          const map = L.map('map', { center: defaultCenter, zoom: defaultZoom, zoomControl: true });
 
           // Esri World Imagery (no key required)
           L.tileLayer(
